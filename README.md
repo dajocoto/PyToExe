@@ -30,7 +30,7 @@ pip install -r requirements.txt
 ```
 
 ## Usage
-<img width="753" height="747" alt="image" src="https://github.com/user-attachments/assets/67bd3729-d3d4-4214-ad51-266e5d5ed17d" />
+<img width="453" height="547" alt="image" src="https://github.com/user-attachments/assets/67bd3729-d3d4-4214-ad51-266e5d5ed17d" />
 
 Run the GUI directly:
 
