@@ -84,6 +84,8 @@ class PyToExeApp(tk.Tk):
         self.upx = tk.BooleanVar(value=True)
         self.hidden_imports = tk.StringVar()
         self.extra_args = tk.StringVar()
+        self.obfuscate = tk.BooleanVar(value=False)
+        self.obfuscate_args = tk.StringVar()
 
         self.build_proc = None
         self.log_queue = queue.Queue()
@@ -144,7 +146,14 @@ class PyToExeApp(tk.Tk):
         ttk.Checkbutton(checks, text="One file (.exe only)", variable=self.onefile).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(checks, text="Windowed (no console)", variable=self.windowed).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(checks, text="Clean build", variable=self.clean_build).pack(side="left", padx=(0, 12))
-        ttk.Checkbutton(checks, text="UPX compression", variable=self.upx).pack(side="left")
+        ttk.Checkbutton(checks, text="UPX compression", variable=self.upx).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(checks, text="Obfuscate source (PyArmor)", variable=self.obfuscate).pack(side="left")
+
+        row3b = ttk.Frame(opts)
+        row3b.pack(fill="x", padx=6, pady=4)
+        ttk.Label(row3b, text="Obfuscator extra args:", width=18).pack(side="left")
+        ttk.Entry(row3b, textvariable=self.obfuscate_args).pack(side="left", fill="x", expand=True)
+        ttk.Label(row3b, text="(passed to 'pyarmor gen')").pack(side="left", padx=(6, 0))
 
         row4 = ttk.Frame(opts)
         row4.pack(fill="x", padx=6, pady=4)
@@ -231,6 +240,8 @@ class PyToExeApp(tk.Tk):
             "upx": self.upx.get(),
             "hidden_imports": self.hidden_imports.get(),
             "extra_args": self.extra_args.get(),
+            "obfuscate": self.obfuscate.get(),
+            "obfuscate_args": self.obfuscate_args.get(),
             "data_files": self.data_editor.rows(),
         }
 
@@ -258,6 +269,8 @@ class PyToExeApp(tk.Tk):
         self.upx.set(cfg.get("upx", True))
         self.hidden_imports.set(cfg.get("hidden_imports", ""))
         self.extra_args.set(cfg.get("extra_args", ""))
+        self.obfuscate.set(cfg.get("obfuscate", False))
+        self.obfuscate_args.set(cfg.get("obfuscate_args", ""))
         self.data_editor.clear()
         for row in cfg.get("data_files", []):
             self.data_editor.add_row(tuple(row))
@@ -283,6 +296,28 @@ class PyToExeApp(tk.Tk):
             self.log_queue.put("PyInstaller installation finished.\n")
         except Exception as e:
             self.log_queue.put(f"Failed to install PyInstaller: {e}\n")
+
+    def _ensure_pyarmor(self):
+        """Return True if PyArmor is available, installing it on user consent."""
+        try:
+            subprocess.run([sys.executable, "-m", "pyarmor", "--version"], capture_output=True, check=True)
+            return True
+        except Exception:
+            pass
+        if not messagebox.askyesno(APP_TITLE, "Obfuscation requires PyArmor, which is not installed. Install it now?"):
+            return False
+        self._append_log("Installing PyArmor...\n")
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pyarmor"],
+            capture_output=True, text=True,
+        )
+        self._append_log(proc.stdout + proc.stderr)
+        try:
+            subprocess.run([sys.executable, "-m", "pyarmor", "--version"], capture_output=True, check=True)
+            return True
+        except Exception:
+            messagebox.showerror(APP_TITLE, "PyArmor installation failed. See log for details.")
+            return False
 
     # ---------- Icon conversion ----------
 
@@ -316,53 +351,108 @@ class PyToExeApp(tk.Tk):
             messagebox.showerror(APP_TITLE, str(e))
             return
 
-        out_dir = self.output_dir.get().strip() or str(Path(script).parent / "dist")
-        os.makedirs(out_dir, exist_ok=True)
-        work_dir = os.path.join(tempfile.gettempdir(), "pytoexe_build")
-        spec_dir = out_dir
+        if self.obfuscate.get() and not self._ensure_pyarmor():
+            return
 
-        cmd = [sys.executable, "-m", "PyInstaller", script, "--distpath", out_dir, "--workpath", work_dir, "--specpath", spec_dir]
+        spec = {
+            "script": script,
+            "icon": icon,
+            "out_dir": self.output_dir.get().strip() or str(Path(script).parent / "dist"),
+            "name": self.app_name.get().strip(),
+            "onefile": self.onefile.get(),
+            "windowed": self.windowed.get(),
+            "clean_build": self.clean_build.get(),
+            "no_confirm": self.no_confirm.get(),
+            "upx": self.upx.get(),
+            "hidden_imports": self.hidden_imports.get(),
+            "extra_args": self.extra_args.get(),
+            "obfuscate": self.obfuscate.get(),
+            "obfuscate_args": self.obfuscate_args.get(),
+            "data_files": self.data_editor.rows(),
+        }
 
-        name = self.app_name.get().strip()
-        if name:
-            cmd += ["--name", name]
-        if self.onefile.get():
-            cmd.append("--onefile")
-        else:
-            cmd.append("--onedir")
-        if self.windowed.get():
-            cmd.append("--windowed")
-        else:
-            cmd.append("--console")
-        if self.clean_build.get():
-            cmd.append("--clean")
-        if self.no_confirm.get():
-            cmd.append("--noconfirm")
-        if not self.upx.get():
-            cmd.append("--noupx")
-        if icon:
-            cmd += ["--icon", icon]
-
-        for imp in [i.strip() for i in self.hidden_imports.get().split(",") if i.strip()]:
-            cmd += ["--hidden-import", imp]
-
-        for src, dest in self.data_editor.rows():
-            cmd += ["--add-data", f"{src}{os.pathsep}{dest}"]
-
-        extra = self.extra_args.get().strip()
-        if extra:
-            cmd += extra.split()
-
-        self._append_log(f"Running: {' '.join(cmd)}\n\n")
         self.build_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.progress.start(12)
         self.status_var.set("Building...")
 
-        threading.Thread(target=self._run_build, args=(cmd,), daemon=True).start()
+        threading.Thread(target=self._run_build, args=(spec,), daemon=True).start()
 
-    def _run_build(self, cmd):
+    def _obfuscate_script(self, script, obf_root):
+        """Run PyArmor on `script`, returning (obfuscated_script_path, runtime_dir_or_None)."""
+        os.makedirs(obf_root, exist_ok=True)
+        cmd = [sys.executable, "-m", "pyarmor", "gen", "-O", obf_root]
+        extra = self.obfuscate_args.get().strip()
+        if extra:
+            cmd += extra.split()
+        cmd.append(script)
+
+        self.log_queue.put(f"Obfuscating: {' '.join(cmd)}\n")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.log_queue.put(proc.stdout + proc.stderr)
+        if proc.returncode != 0:
+            raise RuntimeError(f"PyArmor obfuscation failed (exit code {proc.returncode}).")
+
+        obf_script = os.path.join(obf_root, os.path.basename(script))
+        if not os.path.isfile(obf_script):
+            raise RuntimeError("PyArmor did not produce the expected obfuscated script.")
+
+        runtime_dir = None
+        for entry in os.listdir(obf_root):
+            if entry.startswith("pyarmor_runtime"):
+                runtime_dir = os.path.join(obf_root, entry)
+                break
+        self.log_queue.put("Obfuscation complete.\n\n")
+        return obf_script, runtime_dir
+
+    def _run_build(self, spec):
+        obf_tmp = None
         try:
+            build_script = spec["script"]
+            extra_pyinstaller_args = []
+
+            if spec["obfuscate"]:
+                obf_tmp = tempfile.mkdtemp(prefix="pytoexe_obf_")
+                build_script, runtime_dir = self._obfuscate_script(spec["script"], obf_tmp)
+                extra_pyinstaller_args += ["--paths", obf_tmp]
+                if runtime_dir:
+                    runtime_name = os.path.basename(runtime_dir)
+                    extra_pyinstaller_args += ["--add-data", f"{runtime_dir}{os.pathsep}{runtime_name}"]
+
+            out_dir = spec["out_dir"]
+            os.makedirs(out_dir, exist_ok=True)
+            work_dir = os.path.join(tempfile.gettempdir(), "pytoexe_build")
+
+            cmd = [sys.executable, "-m", "PyInstaller", build_script,
+                   "--distpath", out_dir, "--workpath", work_dir, "--specpath", out_dir]
+
+            if spec["name"]:
+                cmd += ["--name", spec["name"]]
+            cmd.append("--onefile" if spec["onefile"] else "--onedir")
+            cmd.append("--windowed" if spec["windowed"] else "--console")
+            if spec["clean_build"]:
+                cmd.append("--clean")
+            if spec["no_confirm"]:
+                cmd.append("--noconfirm")
+            if not spec["upx"]:
+                cmd.append("--noupx")
+            if spec["icon"]:
+                cmd += ["--icon", spec["icon"]]
+
+            for imp in [i.strip() for i in spec["hidden_imports"].split(",") if i.strip()]:
+                cmd += ["--hidden-import", imp]
+
+            for src, dest in spec["data_files"]:
+                cmd += ["--add-data", f"{src}{os.pathsep}{dest}"]
+
+            cmd += extra_pyinstaller_args
+
+            extra = spec["extra_args"].strip()
+            if extra:
+                cmd += extra.split()
+
+            self.log_queue.put(f"Running: {' '.join(cmd)}\n\n")
+
             self.build_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, universal_newlines=True,
@@ -378,6 +468,8 @@ class PyToExeApp(tk.Tk):
             if self._converted_icon_tmp:
                 shutil.rmtree(self._converted_icon_tmp, ignore_errors=True)
                 self._converted_icon_tmp = None
+            if obf_tmp:
+                shutil.rmtree(obf_tmp, ignore_errors=True)
             self.log_queue.put(("__DONE__", rc))
 
     def stop_build(self):
